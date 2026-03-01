@@ -1,0 +1,74 @@
+name: Build Rulesets
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'publish/**'      # 忽略 publish 目录的变动，防止无限循环触发
+      - 'README.md'
+  workflow_dispatch:      # 允许在 GitHub 网页上手动点击运行
+  schedule:
+    - cron: '0 22 * * *'  # 定时任务：每天早上 6 点 (北京时间，即 UTC 22:00) 自动更新
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # 必须开启写入权限，允许 Bot 提交代码到 main
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch, Merge and Compile
+        run: |
+          # 创建存放最终生成文件的目录
+          mkdir -p publish
+
+          echo "1. 拉取 upstream missav.list..."
+          curl -sSL "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/missav.list" -o upstream.list
+
+          echo "2. 合并 custom 目录下的自定义规则..."
+          # 如果 custom 目录不存在或为空，则创建个空的防止报错
+          touch temp_custom.list
+          if [ -d "custom" ] && [ "$(ls -A custom/*.list 2>/dev/null)" ]; then
+            cat custom/*.list > temp_custom.list
+          fi
+          
+          # 合并上游和自定义规则
+          cat upstream.list temp_custom.list > temp.list
+
+          echo "3. 清理空行、注释并去重..."
+          grep -vE '^(#|$)' temp.list | sort -u > publish/custom_missav.list
+
+          echo "4. 下载 Mihomo 进行编译..."
+          # 获取 Mihomo 最新版本
+          MIHOMO_VER=$(curl -sSL "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | grep '"tag_name":' | head -n 1 | awk -F'"' '{print $4}')
+          if [ -z "$MIHOMO_VER" ]; then MIHOMO_VER="v1.19.20"; fi
+          
+          curl -sSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-linux-amd64-compatible-${MIHOMO_VER}.gz" | gzip -d > mihomo
+          chmod +x mihomo
+
+          echo "5. 编译为 .mrs 二进制文件..."
+          # 将文本规则转换为 mihomo 专属的 domain 类型 mrs 格式
+          ./mihomo convert-ruleset domain text publish/custom_missav.list publish/custom_missav.mrs
+          
+          # 清理运行时的临时文件（避免被提交到仓库）
+          rm -f upstream.list temp_custom.list temp.list mihomo
+
+      - name: Commit and Push to main
+        run: |
+          # 配置 Git 机器人信息
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add publish/
+          
+          # 检查是否有文件变动，有变动才提交，防止 CI 报错
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto update rulesets [skip ci]"
+            git push origin main
+          else
+            echo "No changes detected, skipping commit."
+          fi
